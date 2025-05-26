@@ -80,6 +80,11 @@ class DocumentBuilder(NestedObject):
         if len(word_idcs) < 2:
             lines.append(word_idcs)
         else:
+            # Compute a threshold for paragraph break based on median word width
+            word_widths = boxes[word_idcs, 2] - boxes[word_idcs, 0]
+            median_word_width = np.median(word_widths)
+            paragraph_break_thresh = self.paragraph_break * median_word_width if median_word_width > 0 else self.paragraph_break
+
             sub_line = [word_idcs[0]]
             for i in word_idcs[1:]:
                 horiz_break = True
@@ -87,8 +92,8 @@ class DocumentBuilder(NestedObject):
                 prev_box = boxes[sub_line[-1]]
                 # Compute distance between boxes
                 dist = boxes[i, 0] - prev_box[2]
-                # If distance between boxes is lower than paragraph break, same sub-line
-                if dist < self.paragraph_break:
+                # If distance between boxes is lower than paragraph break threshold, same sub-line
+                if dist < paragraph_break_thresh:
                     horiz_break = False
 
                 if horiz_break:
@@ -96,7 +101,7 @@ class DocumentBuilder(NestedObject):
                     sub_line = [i]
                 else:
                     sub_line.append(i)
-                    
+
             lines.append(sub_line)
 
         return lines
