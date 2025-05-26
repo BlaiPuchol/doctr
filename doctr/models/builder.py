@@ -93,9 +93,10 @@ class DocumentBuilder(NestedObject):
 
                 if horiz_break:
                     lines.append(sub_line)
-                    sub_line = []
-
-                sub_line.append(i)
+                    sub_line = [i]
+                else:
+                    sub_line.append(i)
+                    
             lines.append(sub_line)
 
         return lines
