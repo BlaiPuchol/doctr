@@ -87,8 +87,8 @@ class DocumentBuilder(NestedObject):
                 prev_box = boxes[sub_line[-1]]
                 # Compute distance between boxes
                 dist = boxes[i, 0] - prev_box[2]
-                # If distance between boxes is lower than paragraph break, same sub-line
-                if dist < self.paragraph_break:
+                # If distance between boxes is lower than paragraph break multiplied by the height of the previous box, same sub-line
+                if dist < self.paragraph_break * (prev_box[3] - prev_box[1]):
                     horiz_break = False
 
                 if horiz_break:
@@ -146,13 +146,12 @@ class DocumentBuilder(NestedObject):
         return lines
 
     @staticmethod
-    def _resolve_blocks(boxes: np.ndarray, lines: list[list[int]], paragraph_break: float = 0.035) -> list[list[list[int]]]:
+    def _resolve_blocks(boxes: np.ndarray, lines: list[list[int]]) -> list[list[list[int]]]:
         """Order lines to group them in blocks
 
         Args:
             boxes: bounding boxes of shape (N, 4) or (N, 4, 2)
             lines: list of lines, each line is a list of idx
-            paragraph_break: relative length of the minimum space separating paragraphs
 
         Returns:
             nested list of box indices
@@ -171,6 +170,7 @@ class DocumentBuilder(NestedObject):
             box_lines = np.asarray([(x1, y1, x2, y2) for ((x1, y1), (x2, y2)) in _box_lines])
 
         # Compute geometrical features of lines to clusterize
+        # Clusterizing only with box centers yield to poor results for complex documents
         if boxes.ndim == 3:
             box_features: np.ndarray = np.stack(
                 (
@@ -183,8 +183,6 @@ class DocumentBuilder(NestedObject):
                 ),
                 axis=-1,
             )
-            # For rotated boxes, estimate line height as median of vertical span
-            line_heights = np.abs(box_lines[:, 2, 1] - box_lines[:, 0, 1])
         else:
             box_features = np.stack(
                 (
@@ -197,16 +195,8 @@ class DocumentBuilder(NestedObject):
                 ),
                 axis=-1,
             )
-            # For straight boxes, estimate line height as median of (y2 - y1)
-            line_heights = box_lines[:, 3] - box_lines[:, 1]
-
-        # Compute median line height
-        median_line_height = np.median(line_heights)
-        # Set clustering threshold based on paragraph_break and median line height
-        cluster_threshold = paragraph_break * median_line_height
-
         # Compute clusters
-        clusters = fclusterdata(box_features, t=cluster_threshold, depth=4, criterion="distance", metric="euclidean")
+        clusters = fclusterdata(box_features, t=0.1, depth=4, criterion="distance", metric="euclidean")
 
         _blocks: dict[int, list[int]] = {}
         # Form clusters
@@ -252,11 +242,7 @@ class DocumentBuilder(NestedObject):
             lines = self._resolve_lines(_boxes if _boxes.ndim == 3 else _boxes[:, :4])
             # Decide whether we try to form blocks
             if self.resolve_blocks and len(lines) > 1:
-                _blocks = self._resolve_blocks(
-                    _boxes if _boxes.ndim == 3 else _boxes[:, :4],
-                    lines,
-                    paragraph_break=self.paragraph_break
-                )
+                _blocks = self._resolve_blocks(_boxes if _boxes.ndim == 3 else _boxes[:, :4], lines)
             else:
                 _blocks = [lines]
         else:
