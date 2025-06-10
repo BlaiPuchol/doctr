@@ -146,57 +146,80 @@ class DocumentBuilder(NestedObject):
         return lines
 
     @staticmethod
-    def _resolve_blocks(boxes: np.ndarray, lines: list[list[int]]) -> list[list[list[int]]]:
+    def _resolve_blocks(
+        boxes: np.ndarray,
+        lines: list[list[int]],
+        cluster_threshold_factor: float,
+    ) -> list[list[list[int]]]:
         """Order lines to group them in blocks
 
         Args:
             boxes: bounding boxes of shape (N, 4) or (N, 4, 2)
             lines: list of lines, each line is a list of idx
-
+            cluster_threshold_factor: factor to determine the distance threshold based on median line height
         Returns:
             nested list of box indices
         """
-        # Resolve enclosing boxes of lines
-        if boxes.ndim == 3:
-            box_lines: np.ndarray = np.asarray([
+        if not lines:
+            return []
+
+        # Resolve enclosing boxes of lines.
+        # The `boxes` variable here refers to the input word boxes.
+        if boxes.ndim == 3:  # Input WORD boxes are rotated (N, 4, 2)
+            # Create rotated bounding boxes for each line
+            _box_lines_rrect: np.ndarray = np.asarray([
                 resolve_enclosing_rbbox([tuple(boxes[idx, :, :]) for idx in line])  # type: ignore[misc]
                 for line in lines
             ])
-        else:
-            _box_lines = [
+            # Convert these rotated line boxes to straight bounding boxes (L, 4)
+            if _box_lines_rrect.size == 0:
+                # Handle case where no lines were formed or lines resulted in empty rrects
+                box_lines = np.empty((0, 4), dtype=float)
+            else:
+                min_coords = np.min(_box_lines_rrect, axis=1)
+                max_coords = np.max(_box_lines_rrect, axis=1)
+                box_lines = np.concatenate((min_coords, max_coords), axis=1)
+        else:  # Input WORD boxes are straight (N, 4)
+            _box_lines_tuples = [
                 resolve_enclosing_bbox([(tuple(boxes[idx, :2]), tuple(boxes[idx, 2:])) for idx in line])
                 for line in lines
             ]
-            box_lines = np.asarray([(x1, y1, x2, y2) for ((x1, y1), (x2, y2)) in _box_lines])
+            # box_lines are already straight (L, 4)
+            if not _box_lines_tuples: # Handle case where no lines were formed
+                box_lines = np.empty((0,4), dtype=float)
+            else:
+                box_lines = np.asarray([(x1, y1, x2, y2) for ((x1, y1), (x2, y2)) in _box_lines_tuples])
 
-        # Compute geometrical features of lines to clusterize
-        # Clusterizing only with box centers yield to poor results for complex documents
-        if boxes.ndim == 3:
-            box_features: np.ndarray = np.stack(
-                (
-                    (box_lines[:, 0, 0] + box_lines[:, 0, 1]) / 2,
-                    (box_lines[:, 0, 0] + box_lines[:, 2, 0]) / 2,
-                    (box_lines[:, 0, 0] + box_lines[:, 2, 1]) / 2,
-                    (box_lines[:, 0, 1] + box_lines[:, 2, 1]) / 2,
-                    (box_lines[:, 0, 1] + box_lines[:, 2, 0]) / 2,
-                    (box_lines[:, 2, 0] + box_lines[:, 2, 1]) / 2,
-                ),
-                axis=-1,
-            )
+        if box_lines.shape[0] == 0:  # No lines to process
+            return []
+
+        # Calculate median line height from straight box_lines
+        line_heights = box_lines[:, 3] - box_lines[:, 1]
+        valid_heights = line_heights[line_heights > 0]
+        if valid_heights.size == 0:
+            if box_lines.shape[0] <= 1:
+                 return [lines] # If 0 or 1 line, no clustering needed
+            median_line_height = 10  # Fallback median height
         else:
-            box_features = np.stack(
-                (
-                    (box_lines[:, 0] + box_lines[:, 3]) / 2,
-                    (box_lines[:, 1] + box_lines[:, 2]) / 2,
-                    (box_lines[:, 0] + box_lines[:, 2]) / 2,
-                    (box_lines[:, 1] + box_lines[:, 3]) / 2,
-                    box_lines[:, 0],
-                    box_lines[:, 1],
-                ),
-                axis=-1,
-            )
+            median_line_height = np.median(valid_heights)
+
+        # Calculate the adaptive threshold
+        adaptive_cluster_threshold = cluster_threshold_factor * median_line_height
+        
+        # y_center and x_min are now always calculated from straight box_lines
+        y_centers = (box_lines[:, 1] + box_lines[:, 3]) / 2
+        x_mins = box_lines[:, 0]
+
+        # Uniform feature extraction: use x_mins and y_centers
+        # The previous `if boxes.ndim == 3:` specific feature extraction is removed.
+        box_features = np.column_stack((x_mins, y_centers))
+
         # Compute clusters
-        clusters = fclusterdata(box_features, t=0.1, depth=4, criterion="distance", metric="euclidean")
+        # Use the adaptive_cluster_threshold. Removed depth=4 as it's not standard for fclusterdata with criterion='distance'.
+        if box_features.shape[0] < 1: # Cannot cluster if no features
+            return [lines] # Or handle as appropriate, e.g. return [] if lines was empty initially
+            
+        clusters = fclusterdata(box_features, t=adaptive_cluster_threshold, criterion="distance", metric="euclidean")
 
         _blocks: dict[int, list[int]] = {}
         # Form clusters
@@ -242,7 +265,12 @@ class DocumentBuilder(NestedObject):
             lines = self._resolve_lines(_boxes if _boxes.ndim == 3 else _boxes[:, :4])
             # Decide whether we try to form blocks
             if self.resolve_blocks and len(lines) > 1:
-                _blocks = self._resolve_blocks(_boxes if _boxes.ndim == 3 else _boxes[:, :4], lines)
+                # Pass self.paragraph_break as the cluster_threshold_factor
+                _blocks = self._resolve_blocks(
+                    _boxes if _boxes.ndim == 3 else _boxes[:, :4],
+                    lines,
+                    cluster_threshold_factor=self.paragraph_break
+                )
             else:
                 _blocks = [lines]
         else:
